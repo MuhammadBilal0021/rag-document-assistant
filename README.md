@@ -152,11 +152,11 @@ rag-ai-assistant/
 │       ├── prompt_templates.py  # System + RAG prompt templates
 │       └── memory.py            # Conversation history manager
 │
-├── evaluation/
-│   ├── eval_pipeline.py         # Run answer relevance + faithfulness evals
-│   └── metrics.py               # Scoring functions
-│
-├── tests/
+├── evals/
+│   ├── run_evals.py             # Run answer relevance + faithfulness evals
+│   ├── metrics.py               # Scoring functions
+│   ├── cases.yaml               # 34 evaluation cases (factual, multihop, injection, etc.)
+│   └── config.yaml              # Thresholds and configuration
 │   ├── test_ingestion.py
 │   ├── test_retrieval.py
 │   └── test_api.py
@@ -365,7 +365,7 @@ services:
 
 ## Evaluation
 
-The `evaluation/` module measures answer quality across three axes:
+The `evals/` module measures answer quality across three axes:
 
 | Metric | What it measures |
 |---|---|
@@ -373,10 +373,12 @@ The `evaluation/` module measures answer quality across three axes:
 | **Faithfulness** | Is the answer grounded in the retrieved context (no hallucinations)? |
 | **Retrieval Precision** | Are the retrieved chunks actually relevant to the question? |
 
+The test suite runs against 34 cases covering 6 categories: factual retrieval, multi-hop reasoning, contradiction handling, unanswerable queries, context overflow, and adversarial injection.
+
 Run evals against a test set:
 
 ```bash
-python evaluation/eval_pipeline.py --test-file evaluation/test_cases.json
+python evals/run_evals.py --mock --no-judge
 ```
 
 ---
