@@ -1,418 +1,58 @@
-# 🤖 RAG AI Assistant — Production-Ready Retrieval-Augmented Generation System
+# Private PDF RAG Assistant
+Upload text PDFs, ask questions, and inspect exact source quotes with document names and page numbers. FastAPI serves the API, SentenceTransformers embeds locally, FAISS ranks each owner's vectors, and Groq generates answers.
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi)](https://fastapi.tiangolo.com)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker)](https://docker.com)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+A portfolio/reference implementation with bounded, authenticated document handling. It does not guarantee factual accuracy or production certification.
 
-A production-grade **Retrieval-Augmented Generation (RAG)** system that ingests documents (PDF, DOCX, web URLs), stores them as vector embeddings, and answers user questions with grounded citations — all exposed through a REST API and containerized with Docker.
+## Setup
+Use Python 3.13. Clone https://github.com/MuhammadBilal0021/rag-document-assistant.git, enter the repository, create a virtual environment with python -m venv .venv, activate it, and run pip install -r requirements.txt.
 
-> Built to demonstrate end-to-end AI engineering skills: LLMs, RAG pipelines, vector databases, REST APIs, and cloud-ready deployment.
+Copy .env.example to .env. Set GROQ_API_KEY and configure RAG_USERS_JSON with a different random token per owner:
 
----
+    RAG_USERS_JSON={"replace-with-a-random-token-of-at-least-32-characters":"alice"}
 
-## 📋 Table of Contents
+Generate real tokens using python -c "import secrets; print(secrets.token_urlsafe(32))". Keep them private. This is administrator-managed bearer access, not a registration/login system.
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Tech Stack](#tech-stack)
-- [Features](#features)
-- [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
-- [API Reference](#api-reference)
-- [Configuration](#configuration)
-- [Docker Deployment](#docker-deployment)
-- [Evaluation](#evaluation)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
+Run uvicorn app.main:app --host 127.0.0.1 --port 8000 and, separately, streamlit run frontend/app.py. The first configured startup downloads the embedding model. Groq receives the question, recent conversation and retrieved excerpts; upload only documents your provider policy permits. Indexed text and embeddings persist locally in DATA_DIR.
 
----
+## Implemented features
+- PDF text extraction with page metadata; scanned PDFs require external OCR.
+- Configurable character chunks and normalized local embeddings.
+- Owner-scoped retrieval and transactional SQLite storage of vectors and metadata. FAISS indexes are rebuilt from the owner's bounded collection per query.
+- Same-name replacement, content-hash deduplication, owner-scoped listing/deletion and expiry.
+- Structured generation with exact source-ID/quote validation; invalid evidence leads to abstention.
+- Three-turn context scoped by owner/session. The previous question also provides retrieval context for follow-ups.
+- Streamlit upload/chat/delete UI, health endpoint and offline regression tests.
 
-## Overview
+Quote validation establishes provenance, not logical support for every answer claim. No confidence score is presented. Hybrid retrieval, reranking, OCR, DOCX/URL uploads and SSE streaming are not implemented.
 
-Traditional LLMs hallucinate because they generate answers from parametric memory alone. This system solves that by **grounding every response in retrieved source documents**, dramatically reducing hallucination and making answers verifiable.
+## API
+Authenticated routes require Authorization: Bearer <token>:
+- POST /api/upload: multipart file; returns document_id and chunks_indexed.
+- POST /api/query: question and optional session_id; returns answer, sources and session_id.
+- GET /api/documents: your document metadata.
+- DELETE /api/documents/{document_id}: delete your document/vectors.
+- GET /api/sessions/{session_id}/history: your recent turns.
+- DELETE /api/sessions/{session_id}/history: clear your turns.
+- GET /health: public readiness/configuration status without secrets.
 
-**What it does:**
+Interactive schemas are at /docs. Session IDs do not confer authority; the access token selects the owner.
 
-1. You upload a PDF or provide a URL
-2. The system chunks, embeds, and indexes the document
-3. When you ask a question, the most relevant chunks are retrieved from the vector store
-4. Those chunks are injected into the LLM prompt as context
-5. The LLM generates an answer — with citations back to the source
+## Limits and privacy
+5 MB uploads, 100 pages, 500,000 extracted characters, 1,000 chunks/document, 25 documents/owner, two active expensive requests and 60 upload/query requests/owner/hour. Questions are limited to 2,000 characters. Request limits apply even without Content-Length. Parsing/embedding runs outside the API event loop, though hostile parser workloads may require stronger process isolation.
 
----
+Uploads use random temporary paths and are removed after processing. Text/vectors expire after seven days by default, purged during document operations/search. In-memory history retains at most three turns/session and 1,000 sessions, with a one-day access expiry; restart clears it. Replacing/deleting a document clears its owner's chat context. Backups can retain deleted data: manage backup retention separately.
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        INGESTION PIPELINE                   │
-│                                                             │
-│  Document (PDF/DOCX/URL)                                    │
-│       │                                                     │
-│       ▼                                                     │
-│  Text Extraction  ──►  Chunking  ──►  Embedding  ──►  FAISS│
-│  (PyMuPDF/BS4)        (LangChain)    (OpenAI/OSS)   Index  │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│                         QUERY PIPELINE                      │
-│                                                             │
-│  User Question                                              │
-│       │                                                     │
-│       ▼                                                     │
-│  Embed Query  ──►  FAISS Search  ──►  Top-k Chunks          │
-│                                           │                 │
-│                                           ▼                 │
-│                                    Prompt Template          │
-│                                           │                 │
-│                                           ▼                 │
-│                                    LLM (Groq/OpenAI)        │
-│                                           │                 │
-│                                           ▼                 │
-│                                 Answer + Source Citations   │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│                          API LAYER (FastAPI)                │
-│                                                             │
-│   POST /upload  ──►  Ingestion Pipeline                     │
-│   POST /query   ──►  Query Pipeline  ──►  JSON Response     │
-│   GET  /health  ──►  Status Check                           │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| **Language** | Python 3.10+ |
-| **API Framework** | FastAPI |
-| **LLM Provider** | Groq (Llama 3.3) / OpenAI GPT-4 / Anthropic Claude |
-| **Embeddings** | OpenAI `text-embedding-3-small` / `sentence-transformers` |
-| **Vector Database** | FAISS (local) → Pinecone (cloud, optional) |
-| **Document Parsing** | PyMuPDF, python-docx, BeautifulSoup4 |
-| **Data Processing** | Pandas, NumPy |
-| **Containerization** | Docker, Docker Compose |
-| **Experiment Tracking** | MLflow / Weights & Biases (optional) |
-
----
-
-## Features
-
-### Core (MVP)
-
-- **Multi-format ingestion** — Upload PDF files; web URL and DOCX support in progress
-- **Smart chunking** — Configurable chunk size and overlap to preserve context boundaries
-- **Vector search** — FAISS-powered semantic similarity search over embedded chunks
-- **Grounded answers** — Every response includes source citations (document name + chunk reference)
-- **REST API** — Clean FastAPI endpoints with automatic OpenAPI docs at `/docs`
-
-### Advanced
-
-- **Conversation memory** — Multi-turn context window so follow-up questions work naturally
-- **Guardrails** — Input validation to filter unsafe or off-topic prompts before hitting the LLM
-- **Re-ranking** — Cross-encoder re-ranking of retrieved chunks for higher answer precision
-- **Evaluation metrics** — Tracks answer relevance, faithfulness, and retrieval precision
-- **Streaming responses** — Token-by-token streaming via Server-Sent Events
-- **Structured logging** — Request/response logging with latency tracking
-
----
-
-## Project Structure
-
-```
-rag-ai-assistant/
-│
-├── app/
-│   ├── main.py                  # FastAPI app entry point
-│   ├── api/
-│   │   ├── routes/
-│   │   │   ├── upload.py        # POST /upload endpoint
-│   │   │   └── query.py         # POST /query endpoint
-│   │   └── models.py            # Pydantic request/response schemas
-│   │
-│   ├── core/
-│   │   ├── config.py            # Settings (env vars, LLM config)
-│   │   └── logging.py           # Structured logger setup
-│   │
-│   ├── ingestion/
-│   │   ├── loader.py            # PDF / DOCX / URL document loaders
-│   │   ├── chunker.py           # Text splitting strategies
-│   │   └── embedder.py          # Embedding generation
-│   │
-│   ├── retrieval/
-│   │   ├── vector_store.py      # FAISS index (build / query / persist)
-│   │   └── reranker.py          # Cross-encoder re-ranking (advanced)
-│   │
-│   └── generation/
-│       ├── llm_client.py        # LLM provider abstraction (Groq/OpenAI)
-│       ├── prompt_templates.py  # System + RAG prompt templates
-│       └── memory.py            # Conversation history manager
-│
-├── evaluation/
-│   ├── eval_pipeline.py         # Run answer relevance + faithfulness evals
-│   └── metrics.py               # Scoring functions
-│
-├── tests/
-│   ├── test_ingestion.py
-│   ├── test_retrieval.py
-│   └── test_api.py
-│
-├── docker/
-│   ├── Dockerfile
-│   └── docker-compose.yml
-│
-├── notebooks/
-│   └── rag_exploration.ipynb    # Prototyping and chunk quality analysis
-│
-├── .env.example                 # Environment variable template
-├── requirements.txt
-└── README.md
-```
-
----
-
-## Getting Started
-
-### Prerequisites
-
-- Python 3.10+
-- An API key from [Groq](https://console.groq.com), [OpenAI](https://platform.openai.com), or [Anthropic](https://console.anthropic.com)
-- Docker (optional, for containerized deployment)
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/your-username/rag-ai-assistant.git
-cd rag-ai-assistant
-```
-
-### 2. Create and activate a virtual environment
-
-```bash
-python -m venv venv
-source venv/bin/activate        # Linux/macOS
-venv\Scripts\activate           # Windows
-```
-
-### 3. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Configure environment variables
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and fill in your credentials:
-
-```env
-# LLM Provider (choose one)
-GROQ_API_KEY=your_groq_api_key
-OPENAI_API_KEY=your_openai_api_key
-
-# LLM Model
-LLM_MODEL=llama-3.3-70b-versatile   # or gpt-4o
-
-# Embeddings
-EMBEDDING_MODEL=text-embedding-3-small
-EMBEDDING_PROVIDER=openai            # or local
-
-# Vector Store
-VECTOR_STORE_PATH=./data/faiss_index
-
-# Chunking
-CHUNK_SIZE=500
-CHUNK_OVERLAP=50
-TOP_K_RESULTS=5
-```
-
-### 5. Run the development server
-
-```bash
-uvicorn app.main:app --reload --port 8000
-```
-
-The API will be live at `http://localhost:8000`.
-Interactive docs: `http://localhost:8000/docs`
-
----
-
-## API Reference
-
-### `POST /upload`
-
-Upload and index a document.
-
-**Request** (`multipart/form-data`)
-
-| Field | Type | Description |
-|---|---|---|
-| `file` | `File` | PDF or DOCX file to ingest |
-
-**Response**
-
-```json
-{
-  "status": "success",
-  "document_id": "a3f9c1d2",
-  "chunks_indexed": 42,
-  "message": "Document ingested and indexed successfully."
-}
-```
-
----
-
-### `POST /query`
-
-Ask a question against indexed documents.
-
-**Request** (`application/json`)
-
-```json
-{
-  "question": "What are the key findings of the report?",
-  "top_k": 5,
-  "session_id": "optional-for-memory"
-}
-```
-
-**Response**
-
-```json
-{
-  "answer": "The report identifies three key findings: ...",
-  "sources": [
-    {
-      "document": "annual_report_2024.pdf",
-      "chunk_id": 12,
-      "excerpt": "The primary finding indicates that..."
-    }
-  ],
-  "latency_ms": 843
-}
-```
-
----
-
-### `GET /health`
-
-Check service status.
-
-```json
-{
-  "status": "healthy",
-  "vector_store": "loaded",
-  "documents_indexed": 3
-}
-```
-
----
+Use separate tokens per owner and protect DATA_DIR. A stolen token grants its owner's access. Run one worker/replica: history and concurrency controls are process-local. TLS, reverse-proxy protections and process isolation are deployment responsibilities.
 
 ## Configuration
+See .env.example. Actual names: MODEL_NAME, EMBED_MODEL, DATA_DIR, CHUNK_SIZE, CHUNK_OVERLAP, TOP_K, REQUESTS_PER_HOUR, RETENTION_DAYS, RAG_USERS_JSON and GROQ_API_KEY. Chunk sizes measure characters. Changing embedding models/dimensions requires a new DATA_DIR and document re-upload.
 
-All configuration is driven by environment variables. See `.env.example` for the full list.
+## Docker and migration
+Run docker compose up --build. Compose binds the API to localhost and persists data in a named volume; the container runs as a non-root user. Start Streamlit separately.
 
-| Variable | Default | Description |
-|---|---|---|
-| `LLM_MODEL` | `llama-3.3-70b-versatile` | LLM model to use for generation |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | Model for generating embeddings |
-| `CHUNK_SIZE` | `500` | Tokens per chunk |
-| `CHUNK_OVERLAP` | `50` | Overlap between consecutive chunks |
-| `TOP_K_RESULTS` | `5` | Number of chunks retrieved per query |
-| `VECTOR_STORE_PATH` | `./data/faiss_index` | Path to persist FAISS index |
+Old shared faiss.index/metadata.json files are not imported because they have no reliable owner information. Keep a backup and re-upload with the correct owner's token. Original document files and repository history are not deleted.
 
----
+## Validation and roadmap
+Run pip install -r requirements-dev.txt then python -m pytest -q. Tests use real PDF parsing, SQLite and FAISS with deterministic test embeddings and a mocked generator. They verify security/lifecycle behavior, not real retrieval quality or model accuracy. CI also checks dependency consistency and advisories.
 
-## Docker Deployment
-
-### Build and run with Docker Compose
-
-```bash
-docker-compose up --build
-```
-
-The API will be available at `http://localhost:8000`.
-
-### Build manually
-
-```bash
-docker build -t rag-assistant -f docker/Dockerfile .
-docker run -p 8000:8000 --env-file .env rag-assistant
-```
-
-### `docker-compose.yml` overview
-
-```yaml
-services:
-  api:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./data:/app/data     # Persist FAISS index across restarts
-    env_file:
-      - .env
-```
-
----
-
-## Evaluation
-
-The `evaluation/` module measures answer quality across three axes:
-
-| Metric | What it measures |
-|---|---|
-| **Answer Relevance** | Does the answer address the question? |
-| **Faithfulness** | Is the answer grounded in the retrieved context (no hallucinations)? |
-| **Retrieval Precision** | Are the retrieved chunks actually relevant to the question? |
-
-Run evals against a test set:
-
-```bash
-python evaluation/eval_pipeline.py --test-file evaluation/test_cases.json
-```
-
----
-
-## Roadmap
-
-- [x] PDF ingestion pipeline
-- [x] FAISS vector store
-- [x] RAG query pipeline
-- [x] FastAPI REST endpoints
-- [x] Docker containerization
-- [ ] DOCX + web URL ingestion
-- [ ] Streaming responses (SSE)
-- [ ] Pinecone cloud vector store integration
-- [ ] Frontend UI (Streamlit)
-- [ ] CI/CD pipeline (GitHub Actions)
-- [ ] MLflow experiment tracking
-
----
-
-## Contributing
-
-Pull requests are welcome. For major changes, please open an issue first to discuss what you'd like to change.
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/streaming-responses`)
-3. Commit your changes (`git commit -m 'Add streaming response support'`)
-4. Push to the branch (`git push origin feature/streaming-responses`)
-5. Open a Pull Request
-
----
-
-## License
-
-[MIT](LICENSE)
-
----
-
-<p align="center">Built by Muhammad · AI Engineer · Islamabad, PK</p>
+Next: build human-reviewed question/evidence fixtures for one document domain; measure retrieval recall, citation correctness, faithfulness, abstention and latency; then compare reranking/hybrid retrieval to that baseline. See docs/verification.md for checked scope.
