@@ -1,106 +1,49 @@
-import streamlit as st
-import requests
+import os
 import uuid
+import requests
+import streamlit as st
 
-# --- Config ---
-API_URL = "http://localhost:8000"
-
-st.set_page_config(
-    page_title="RAG Assistant",
-    page_icon="🤖",
-    layout="wide"
-)
-
-# --- Session State ---
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# --- Sidebar ---
-with st.sidebar:
-    st.title("📄 RAG Assistant")
-    st.markdown("---")
-    
-    st.subheader("Upload Document")
-    uploaded_file = st.file_uploader("Choose a PDF", type=["pdf"])
-    
-    if uploaded_file:
-        if st.button("Upload & Index", type="primary"):
-            with st.spinner("Uploading..."):
-                files = {"file": (uploaded_file.name, uploaded_file, "application/pdf")}
-                response = requests.post(f"{API_URL}/api/upload", files=files)
-                if response.status_code == 200:
-                    st.success("✅ Document uploaded!")
-                else:
-                    st.error("❌ Upload failed.")
-
-    st.markdown("---")
-    
-    if st.button("🗑️ Clear Chat"):
-        st.session_state.messages = []
-        st.session_state.session_id = str(uuid.uuid4())
+st.set_page_config(page_title="Private PDF Assistant",page_icon="📄",layout="wide")
+st.title("Private PDF Assistant")
+base=os.environ.get("RAG_API_URL","http://127.0.0.1:8000")
+token=st.sidebar.text_input("Access token",type="password")
+if st.session_state.get("token")!=token:
+    st.session_state.clear()
+    st.session_state.update(token=token,session=str(uuid.uuid4()),messages=[])
+if not token:
+    st.info("Enter your access token. Documents are private to its owner and retained for seven days by default.")
+    st.stop()
+def api(method,path,**kwargs):
+    response=requests.request(method,base+"/api"+path,headers={"Authorization":"Bearer "+token},timeout=60,**kwargs)
+    response.raise_for_status()
+    return response.json()
+try:
+    uploaded=st.sidebar.file_uploader("PDF (up to 5 MB; text PDFs only)",type=["pdf"])
+    if uploaded and st.sidebar.button("Upload / replace"):
+        api("POST","/upload",files={"file":(uploaded.name,uploaded,"application/pdf")})
+        st.session_state.messages=[]
+        st.sidebar.success("Indexed. Same filename replaces the previous version.")
+    for doc in api("GET","/documents")["documents"]:
+        st.sidebar.caption(doc["name"])
+        if st.sidebar.button("Delete",key=doc["id"]):
+            api("DELETE","/documents/"+doc["id"])
+            st.session_state.messages=[]
+            st.rerun()
+    if st.sidebar.button("Clear chat"):
+        api("DELETE",f"/sessions/{st.session_state.session}/history")
+        st.session_state.messages=[]
         st.rerun()
-
-    st.markdown("---")
-    st.caption(f"Session: {st.session_state.session_id[:8]}...")
-
-# --- Main Chat Area ---
-st.title("🤖 RAG Assistant")
-st.caption("Ask questions about your uploaded documents.")
-
-# Display chat history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.write(message["content"])
-        if "sources" in message and message["sources"]:
-            with st.expander("📚 Sources"):
-                for s in message["sources"]:
-                    st.caption(f"Chunk {s['chunk_index']} | Score: {s['score']}")
-                    st.caption(f"{s['text'][:200]}...")
-                    st.markdown("---")
-
-# Chat input
-if prompt := st.chat_input("Ask a question about your document..."):
-    
-    # Show user message
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.write(prompt)
-
-    # Get answer from API
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                response = requests.post(
-                    f"{API_URL}/api/query",
-                    json={
-                        "question": prompt,
-                        "session_id": st.session_state.session_id
-                    }
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    answer = result["answer"]
-                    sources = result.get("sources", [])
-                    
-                    st.write(answer)
-                    
-                    if sources:
-                        with st.expander("📚 Sources"):
-                            for s in sources:
-                                st.caption(f"Chunk {s['chunk_index']} | Score: {s['score']}")
-                                st.caption(f"{s['text'][:200]}...")
-                                st.markdown("---")
-                    
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": answer,
-                        "sources": sources
-                    })
-                else:
-                    st.error("❌ API error. Is the server running?")
-                    
-            except requests.exceptions.ConnectionError:
-                st.error("❌ Cannot connect to API. Run: uvicorn app.main:app --reload")
+    for item in st.session_state.messages:
+        with st.chat_message(item["role"]):
+            st.write(item["content"])
+            for source in item.get("sources",[]):
+                st.caption(f"{source['source']} — page {source['page']} [{source['source_id']}]")
+                st.write(source["quote"])
+    if question:=st.chat_input("Ask about your documents"):
+        result=api("POST","/query",json={"question":question,"session_id":st.session_state.session})
+        st.session_state.messages.extend([{"role":"user","content":question},
+            {"role":"assistant","content":result["answer"],"sources":result["sources"]}])
+        st.rerun()
+except requests.RequestException as exc:
+    status=getattr(exc.response,"status_code",None)
+    st.error(f"Request failed ({status or 'connection/timeout'}). Check your token, server status, or processing limits.")

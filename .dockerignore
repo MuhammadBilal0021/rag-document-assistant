@@ -1,42 +1,12 @@
-# Version control
 .git
-.gitignore
-
-# Environment
 .env
-.env.local
-.env.*.local
-
-# Data & indexes
-data/
-
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-dist/
-build/
-.pytest_cache/
-
-# Virtual environments
-venv/
-.venv/
-
-# IDE
-.vscode/
-.idea/
-
-# Tests
-test.py
-tests/
-
-# Docs & config
-*.md
-LICENSE
-Dockerfile
-docker-compose.yml
-
-# OS
-.DS_Store
-Thumbs.db
+.env.*
+!.env.example
+venv
+.venv
+__pycache__
+.pytest_cache
+data
+*.db
+*.db-*
+tests

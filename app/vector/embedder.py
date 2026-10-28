@@ -1,30 +1,12 @@
-# app/vector/embedder.py
-from sentence_transformers import SentenceTransformer
-from app.config import settings
 import numpy as np
+from sentence_transformers import SentenceTransformer
 
 class Embedder:
-    def __init__(self):
-        print(f"Loading embedding model: {settings.embed_model}")
-        self.model = SentenceTransformer(settings.embed_model)
-        print("Embedding model loaded.")
-
-    def embed_chunks(self, chunks: list[dict]) -> list[dict]:
-        """
-        Takes chunks from chunker.py and adds an 'embedding' key to each.
-        Returns the same chunks with embeddings added.
-        """
-        texts = [chunk["text"] for chunk in chunks]
-        embeddings = self.model.encode(texts, show_progress_bar=True)
-
-        for i, chunk in enumerate(chunks):
-            chunk["embedding"] = embeddings[i]
-
-        return chunks
-
-    def embed_query(self, query: str) -> np.ndarray:
-        """
-        Embeds a single search query.
-        Called at query time, not ingestion time.
-        """
-        return self.model.encode(query)
+    def __init__(self, model_name):
+        self.model=SentenceTransformer(model_name,trust_remote_code=False)
+        self.dimension=self.model.get_sentence_embedding_dimension()
+    def embed_chunks(self,chunks):
+        values=self.model.encode([c["text"] for c in chunks],normalize_embeddings=True)
+        return [{**c,"embedding":values[i]} for i,c in enumerate(chunks)]
+    def embed_query(self,query):
+        return self.model.encode(query,normalize_embeddings=True)
